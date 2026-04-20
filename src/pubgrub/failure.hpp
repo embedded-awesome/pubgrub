@@ -20,6 +20,17 @@ public:
     using exception_base::exception_base;
 };
 
+/**
+ * @brief Exception thrown by the solver when the provider's `should_cancel()` returns true.
+ *
+ * Requires the provider to satisfy the @ref pubgrub::cancellable_provider concept.
+ */
+class solver_cancelled : public exception_base {
+public:
+    solver_cancelled()
+        : exception_base("Dependency resolution was cancelled by the provider") {}
+};
+
 template <typename IC>
 class unsolvable_failure : public unsolvable_failure_base {
     std::list<IC> _incompats;
@@ -166,7 +177,8 @@ struct failure_writer {
             if (terms[0].positive) {
                 // A single positive term indicates that the associated requirement has been
                 // completely ruled out
-                if (std::holds_alternative<typename ic_type::unavailable_cause>(ic.cause())) {
+                if (std::holds_alternative<typename ic_type::unavailable_cause>(ic.cause())
+                    || std::holds_alternative<typename ic_type::custom_cause>(ic.cause())) {
                     auto unavail = explain::unavailable<requirement_type>{terms[0].requirement};
                     r(unavail);
                 } else {

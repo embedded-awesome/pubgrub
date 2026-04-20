@@ -29,8 +29,12 @@ public:
         const incompatibility& left;
         const incompatibility& right;
     };
-    using cause_type
-        = std::variant<root_cause, unavailable_cause, dependency_cause, conflict_cause>;
+    /// Custom external cause, e.g. provider-signalled dependency unavailability with a reason.
+    struct custom_cause {
+        std::string reason;
+    };
+    using cause_type = std::
+        variant<root_cause, unavailable_cause, dependency_cause, conflict_cause, custom_cause>;
 
 private:
     term_vec   _terms;
