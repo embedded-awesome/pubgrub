@@ -537,15 +537,13 @@ TEST_CASE("Rust tests.rs scenarios") {
     }
 
     SECTION("confusing_with_lots_of_holes") {
-        test_repo repo_{
-            {pkg("root", 1, {req("foo", {1, 6}), req("baz", {1, 2})}),
-             pkg("foo", 1, {req("bar", {0, 100})}),
-             pkg("foo", 2, {req("bar", {0, 100})}),
-             pkg("foo", 3, {req("bar", {0, 100})}),
-             pkg("foo", 4, {req("bar", {0, 100})}),
-             pkg("foo", 5, {req("bar", {0, 100})}),
-             pkg("baz", 1, {})},
-        };
+        std::vector<test_package> pkgs;
+        pkgs.push_back(pkg("root", 1, {req("foo", {1, 6}), req("baz", {1, 2})}));
+        for (int i = 1; i <= 5; ++i) {
+            pkgs.push_back(pkg("foo", i, {req("bar", {0, 100})}));
+        }
+        pkgs.push_back(pkg("baz", 1, {}));
+        test_repo repo_{std::move(pkgs)};
 
         CHECK_THROWS_AS(pubgrub::solve(reqs(req("root", {1, 2})), repo_), exception_type);
     }
