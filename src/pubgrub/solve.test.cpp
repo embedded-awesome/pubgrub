@@ -116,6 +116,18 @@ auto sln(Terms... t) {
     return reqs(t...);
 }
 
+auto normalize_terms(const std::vector<pubgrub::test::simple_req>& terms) {
+    std::vector<std::string> reprs;
+    reprs.reserve(terms.size());
+    for (const auto& term : terms) {
+        std::stringstream ss;
+        ss << term;
+        reprs.push_back(ss.str());
+    }
+    std::sort(reprs.begin(), reprs.end());
+    return reprs;
+}
+
 TEST_CASE("Basic solving") {
     const solve_case& test = GENERATE(Catch::Generators::values<solve_case>({
         test_case("Empty", repo(), reqs(), sln()),
@@ -441,18 +453,6 @@ TEST_CASE("Explain 1") {
 }
 
 TEST_CASE("Rust examples.rs scenarios") {
-    auto normalized = [](const std::vector<pubgrub::test::simple_req>& terms) {
-        std::vector<std::string> reprs;
-        reprs.reserve(terms.size());
-        for (const auto& term : terms) {
-            std::stringstream ss;
-            ss << term;
-            reprs.push_back(ss.str());
-        }
-        std::sort(reprs.begin(), reprs.end());
-        return reprs;
-    };
-
     const solve_case& test = GENERATE(Catch::Generators::values<solve_case>({
         test_case("no_conflict",
                   repo(pkg("root", 1, {req("foo", {100, 200})}),
@@ -505,12 +505,12 @@ TEST_CASE("Rust examples.rs scenarios") {
 
     INFO("Checking Rust examples.rs port case: " << test.name);
     auto solved = pubgrub::solve(test.roots, test.repo);
-    CHECK(normalized(solved) == normalized(test.expected_sln));
+    CHECK(normalize_terms(solved) == normalize_terms(test.expected_sln));
 }
 
 TEST_CASE("Rust tests.rs scenarios") {
     using exception_type = pubgrub::solve_failure_type_t<pubgrub::test::simple_req>;
-    constexpr int determinism_iterations = 10;
+    constexpr int DETERMINISM_VERIFICATION_RUNS = 10;
 
     SECTION("same_result_on_repeated_runs") {
         test_repo repo_{
@@ -523,7 +523,7 @@ TEST_CASE("Rust tests.rs scenarios") {
 
         const auto roots = reqs(req("a", {0, 1}));
         const auto first = pubgrub::solve(roots, repo_);
-        for (int i = 0; i < determinism_iterations; ++i) {
+        for (int i = 0; i < DETERMINISM_VERIFICATION_RUNS; ++i) {
             CHECK(pubgrub::solve(roots, repo_) == first);
         }
     }
