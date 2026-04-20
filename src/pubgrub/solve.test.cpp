@@ -439,3 +439,113 @@ TEST_CASE("Explain 1") {
     }
     CHECK(test.repo.n_debug_messages_recvd > 0);
 }
+
+TEST_CASE("Rust examples.rs scenarios") {
+    auto normalized = [](const std::vector<pubgrub::test::simple_req>& terms) {
+        std::vector<std::string> reprs;
+        reprs.reserve(terms.size());
+        for (const auto& term : terms) {
+            std::stringstream ss;
+            ss << term;
+            reprs.push_back(ss.str());
+        }
+        std::sort(reprs.begin(), reprs.end());
+        return reprs;
+    };
+
+    const solve_case& test = GENERATE(Catch::Generators::values<solve_case>({
+        test_case("no_conflict",
+                  repo(pkg("root", 1, {req("foo", {100, 200})}),
+                       pkg("foo", 100, {req("bar", {100, 200})}),
+                       pkg("bar", 100, {}),
+                       pkg("bar", 200, {})),
+                  reqs(req("root", {1, 2})),
+                  sln(req("root", {1, 2}), req("foo", {100, 101}), req("bar", {100, 101}))),
+        test_case("avoiding_conflict_during_decision_making",
+                  repo(pkg("root", 1, {req("foo", {100, 200}), req("bar", {100, 200})}),
+                       pkg("foo", 110, {req("bar", {200, 300})}),
+                       pkg("foo", 100, {}),
+                       pkg("bar", 100, {}),
+                       pkg("bar", 110, {}),
+                       pkg("bar", 200, {})),
+                  reqs(req("root", {1, 2})),
+                  sln(req("root", {1, 2}), req("foo", {100, 101}), req("bar", {110, 111}))),
+        test_case("conflict_resolution",
+                  repo(pkg("root", 1, {req("foo", {100, 1000})}),
+                       pkg("foo", 200, {req("bar", {100, 200})}),
+                       pkg("foo", 100, {}),
+                       pkg("bar", 100, {req("foo", {100, 200})})),
+                  reqs(req("root", {1, 2})),
+                  sln(req("root", {1, 2}), req("foo", {100, 101}))),
+        test_case("conflict_with_partial_satisfier",
+                  repo(pkg("root", 1, {req("foo", {100, 200}), req("target", {200, 300})}),
+                       pkg("foo", 110, {req("left", {100, 200}), req("right", {100, 200})}),
+                       pkg("foo", 100, {}),
+                       pkg("left", 100, {req("shared", {100, 1000})}),
+                       pkg("right", 100, {req("shared", {0, 200})}),
+                       pkg("shared", 200, {}),
+                       pkg("shared", 100, {req("target", {100, 200})}),
+                       pkg("target", 200, {}),
+                       pkg("target", 100, {})),
+                  reqs(req("root", {1, 2})),
+                  sln(req("root", {1, 2}), req("foo", {100, 101}), req("target", {200, 201}))),
+        test_case("double_choices",
+                  repo(pkg("a", 0, {req("b", {0, 3}), req("c", {0, 3})}),
+                       pkg("b", 0, {req("d", {0, 1})}),
+                       pkg("b", 1, {req("d", {1, 2})}),
+                       pkg("c", 0, {}),
+                       pkg("c", 1, {req("d", {2, 3})}),
+                       pkg("d", 0, {})),
+                  reqs(req("a", {0, 1})),
+                  sln(req("a", {0, 1}),
+                      req("b", {0, 1}),
+                      req("c", {0, 1}),
+                      req("d", {0, 1}))),
+    }));
+
+    INFO("Checking Rust examples.rs port case: " << test.name);
+    auto solved = pubgrub::solve(test.roots, test.repo);
+    CHECK(normalized(solved) == normalized(test.expected_sln));
+}
+
+TEST_CASE("Rust tests.rs scenarios") {
+    using exception_type = pubgrub::solve_failure_type_t<pubgrub::test::simple_req>;
+
+    SECTION("same_result_on_repeated_runs") {
+        test_repo repo_{
+            {pkg("c", 0, {}),
+             pkg("c", 2, {}),
+             pkg("b", 0, {}),
+             pkg("b", 1, {req("c", {0, 1})}),
+             pkg("a", 0, {req("b", {0, 3}), req("c", {0, 3})})},
+        };
+
+        const auto roots = reqs(req("a", {0, 1}));
+        const auto first = pubgrub::solve(roots, repo_);
+        for (int i = 0; i < 10; ++i) {
+            CHECK(pubgrub::solve(roots, repo_) == first);
+        }
+    }
+
+    SECTION("should_always_find_a_satisfier") {
+        test_repo repo_{
+            {pkg("a", 0, {req("b", pubgrub::interval_set<int>{})}), pkg("c", 0, {req("a", {0, 1})})},
+        };
+        CHECK_THROWS_AS(pubgrub::solve(reqs(req("a", {0, 1})), repo_), exception_type);
+        CHECK_THROWS_AS(pubgrub::solve(reqs(req("c", {0, 1})), repo_), exception_type);
+    }
+
+    SECTION("confusing_with_lots_of_holes") {
+        test_repo repo_{
+            {pkg("root", 1, {req("foo", {1, 6}), req("baz", {1, 2})}),
+             pkg("foo", 1, {req("bar", {0, 100})}),
+             pkg("foo", 2, {req("bar", {0, 100})}),
+             pkg("foo", 3, {req("bar", {0, 100})}),
+             pkg("foo", 4, {req("bar", {0, 100})}),
+             pkg("foo", 5, {req("bar", {0, 100})}),
+             pkg("baz", 1, {})},
+        };
+
+        CHECK_THROWS_AS(pubgrub::solve(reqs(req("root", {1, 2})), repo_), exception_type);
+    }
+}
