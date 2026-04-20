@@ -510,6 +510,7 @@ TEST_CASE("Rust examples.rs scenarios") {
 
 TEST_CASE("Rust tests.rs scenarios") {
     using exception_type = pubgrub::solve_failure_type_t<pubgrub::test::simple_req>;
+    constexpr int determinism_iterations = 10;
 
     SECTION("same_result_on_repeated_runs") {
         test_repo repo_{
@@ -522,7 +523,7 @@ TEST_CASE("Rust tests.rs scenarios") {
 
         const auto roots = reqs(req("a", {0, 1}));
         const auto first = pubgrub::solve(roots, repo_);
-        for (int i = 0; i < 10; ++i) {
+        for (int i = 0; i < determinism_iterations; ++i) {
             CHECK(pubgrub::solve(roots, repo_) == first);
         }
     }
