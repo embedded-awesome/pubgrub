@@ -528,7 +528,7 @@ TEST_CASE("Rust tests.rs scenarios") {
         }
     }
 
-    SECTION("should_always_find_a_satisfier") {
+    SECTION("should_fail_when_no_satisfier_exists") {
         test_repo test_repo{
             {pkg("a", 0, {req("b", pubgrub::interval_set<int>{})}), pkg("c", 0, {req("a", {0, 1})})},
         };
