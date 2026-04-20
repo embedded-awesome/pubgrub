@@ -332,7 +332,7 @@ struct solver {
             const ic_type& root_cause = resolve_conflict(ic);
             _debug("  Determined root cause of conflict to be {}", neo::repr_value(root_cause));
 
-            // Update per-package conflict counts for use by the optional prioritise hook.
+            // Update per-package conflict counts for use by the optional prioritize hook.
             for (const auto& t : root_cause.terms()) {
                 conflict_counts[t.key()]++;
             }

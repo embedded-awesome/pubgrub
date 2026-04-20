@@ -67,7 +67,8 @@ namespace semver {
         }
         std::uint32_t value = 0;
         while (!sv.empty() && sv[0] >= '0' && sv[0] <= '9') {
-            // Guard against overflow
+            // Guard against overflow: ensure multiplying by 10 and adding up to 9
+            // (the maximum digit value) won't overflow uint32_t.
             if (value > (UINT32_MAX - 9) / 10) {
                 return std::nullopt;
             }

@@ -371,7 +371,7 @@ TEST_CASE("Unsolvable") {
         pubgrub::solve(test.roots, test.repo);
         FAIL("Expected a solver failure");
     } catch (const exception_type& fail) {
-        pubgrub::generate_explaination(fail, [&](auto&&) {});
+        pubgrub::generate_explanation(fail, [&](auto&&) {});
     }
     CHECK(test.repo.n_debug_messages_recvd > 0);
 }
@@ -432,7 +432,7 @@ TEST_CASE("Explain 1") {
         FAIL("Expected a failure");
     } catch (const pubgrub::solve_failure_type_t<pubgrub::test::simple_req>& fail) {
         explain_handler ex;
-        pubgrub::generate_explaination(fail, ex);
+        pubgrub::generate_explanation(fail, ex);
         CHECK(ex.message.str() == "Known: foo [100, 200) is not available\n"
                                   "Known: foo [100, 200) is needed\n"
                                   "Thus: There is no solution\n");
@@ -665,7 +665,7 @@ TEST_CASE("Dependency unavailability explanation uses 'unavailable'") {
         pubgrub::solve(reqs(req("foo", {1, 2})), ur);
         FAIL("Expected failure");
     } catch (const fail_t& fail) {
-        pubgrub::generate_explaination(fail, [&](auto event) {
+        pubgrub::generate_explanation(fail, [&](auto event) {
             using T = std::decay_t<decltype(event)>;
             if constexpr (
                 std::is_same_v<T, pubgrub::explain::conclusion<pubgrub::explain::unavailable<pubgrub::test::simple_req>>>

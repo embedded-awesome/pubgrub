@@ -296,9 +296,16 @@ struct failure_writer {
 }  // namespace detail
 
 template <typename IC, explain::handler<typename IC::term_type::requirement_type> Handler>
-void generate_explaination(const unsolvable_failure<IC>& fail, Handler&& h) {
+void generate_explanation(const unsolvable_failure<IC>& fail, Handler&& h) {
     detail::failure_writer<IC, Handler> f{fail, h};
     f.generate();
+}
+
+/// @deprecated Use generate_explanation (without the typo).
+template <typename IC, explain::handler<typename IC::term_type::requirement_type> Handler>
+[[deprecated("use generate_explanation")]]
+void generate_explaination(const unsolvable_failure<IC>& fail, Handler&& h) {
+    generate_explanation(fail, std::forward<Handler>(h));
 }
 
 }  // namespace pubgrub
