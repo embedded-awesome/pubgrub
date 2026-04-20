@@ -510,10 +510,10 @@ TEST_CASE("Rust examples.rs scenarios") {
 
 TEST_CASE("Rust tests.rs scenarios") {
     using exception_type = pubgrub::solve_failure_type_t<pubgrub::test::simple_req>;
-    constexpr int DETERMINISM_VERIFICATION_RUNS = 10;
+    constexpr int kDeterminismVerificationRuns = 10;
 
     SECTION("same_result_on_repeated_runs") {
-        test_repo repo_{
+        test_repo test_repo{
             {pkg("c", 0, {}),
              pkg("c", 2, {}),
              pkg("b", 0, {}),
@@ -522,18 +522,18 @@ TEST_CASE("Rust tests.rs scenarios") {
         };
 
         const auto roots = reqs(req("a", {0, 1}));
-        const auto first = pubgrub::solve(roots, repo_);
-        for (int i = 0; i < DETERMINISM_VERIFICATION_RUNS; ++i) {
-            CHECK(pubgrub::solve(roots, repo_) == first);
+        const auto first = pubgrub::solve(roots, test_repo);
+        for (int i = 0; i < kDeterminismVerificationRuns; ++i) {
+            CHECK(pubgrub::solve(roots, test_repo) == first);
         }
     }
 
     SECTION("should_always_find_a_satisfier") {
-        test_repo repo_{
+        test_repo test_repo{
             {pkg("a", 0, {req("b", pubgrub::interval_set<int>{})}), pkg("c", 0, {req("a", {0, 1})})},
         };
-        CHECK_THROWS_AS(pubgrub::solve(reqs(req("a", {0, 1})), repo_), exception_type);
-        CHECK_THROWS_AS(pubgrub::solve(reqs(req("c", {0, 1})), repo_), exception_type);
+        CHECK_THROWS_AS(pubgrub::solve(reqs(req("a", {0, 1})), test_repo), exception_type);
+        CHECK_THROWS_AS(pubgrub::solve(reqs(req("c", {0, 1})), test_repo), exception_type);
     }
 
     SECTION("confusing_with_lots_of_holes") {
@@ -543,8 +543,8 @@ TEST_CASE("Rust tests.rs scenarios") {
             pkgs.push_back(pkg("foo", i, {req("bar", {0, 100})}));
         }
         pkgs.push_back(pkg("baz", 1, {}));
-        test_repo repo_{std::move(pkgs)};
+        test_repo test_repo{std::move(pkgs)};
 
-        CHECK_THROWS_AS(pubgrub::solve(reqs(req("root", {1, 2})), repo_), exception_type);
+        CHECK_THROWS_AS(pubgrub::solve(reqs(req("root", {1, 2})), test_repo), exception_type);
     }
 }
