@@ -371,7 +371,7 @@ TEST_CASE("Unsolvable") {
         pubgrub::solve(test.roots, test.repo);
         FAIL("Expected a solver failure");
     } catch (const exception_type& fail) {
-        pubgrub::generate_explaination(fail, [&](auto&&) {});
+        pubgrub::generate_explanation(fail, [&](auto&&) {});
     }
     CHECK(test.repo.n_debug_messages_recvd > 0);
 }
@@ -432,10 +432,290 @@ TEST_CASE("Explain 1") {
         FAIL("Expected a failure");
     } catch (const pubgrub::solve_failure_type_t<pubgrub::test::simple_req>& fail) {
         explain_handler ex;
-        pubgrub::generate_explaination(fail, ex);
+        pubgrub::generate_explanation(fail, ex);
         CHECK(ex.message.str() == "Known: foo [100, 200) is not available\n"
                                   "Known: foo [100, 200) is needed\n"
                                   "Thus: There is no solution\n");
     }
     CHECK(test.repo.n_debug_messages_recvd > 0);
+}
+// ============================================================================
+// Tests for new Rust-parity features
+// ============================================================================
+
+#include <pubgrub/dependency_result.hpp>
+#include <pubgrub/version.hpp>
+
+// ---------------------------------------------------------------------------
+// Self-dependency fix (Rust: "Allow multiple self-dependencies")
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Self-dependency is silently skipped") {
+    // A package that lists itself as a dependency should no longer throw.
+    // The self-dep is trivially satisfied (the package is already chosen) and is skipped.
+    auto r = repo(
+        pkg("foo", 1, {req("foo", {1, 2})}),  // foo@1 depends on foo@[1,2) — self, skip it
+        pkg("bar", 1, {})
+    );
+
+    // Must not throw
+    auto result = pubgrub::solve(reqs(req("foo", {1, 2}), req("bar", {1, 2})), r);
+    CHECK(result == reqs(req("bar", {1, 2}), req("foo", {1, 2})));
+}
+
+TEST_CASE("Self-dependency with broad range is silently skipped") {
+    // foo@5 depends on foo@[1, 1000) — trivially satisfied, still skipped.
+    auto r = repo(pkg("foo", 5, {req("foo", {1, 1000})}));
+    auto result = pubgrub::solve(reqs(req("foo", {1, 10})), r);
+    CHECK(result == reqs(req("foo", {5, 6})));
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation (cancellable_provider)
+// ---------------------------------------------------------------------------
+
+// Wraps test_repo and cancels after N iterations of the solve loop.
+struct cancellable_test_repo {
+    test_repo              base;
+    int                    cancel_after       = 0;
+    mutable int            should_cancel_calls = 0;
+
+    auto best_candidate(const pubgrub::test::simple_req& r) const noexcept {
+        return base.best_candidate(r);
+    }
+    std::vector<pubgrub::test::simple_req>
+    requirements_of(const pubgrub::test::simple_req& r) const noexcept {
+        return base.requirements_of(r);
+    }
+    void debug(std::string_view sv) const noexcept { base.debug(sv); }
+
+    bool should_cancel() const noexcept {
+        ++should_cancel_calls;
+        return should_cancel_calls > cancel_after;
+    }
+};
+
+TEST_CASE("Solver cancellation: should_cancel is honoured") {
+    static_assert(pubgrub::cancellable_provider<cancellable_test_repo>,
+                  "cancellable_test_repo must satisfy cancellable_provider");
+
+    // cancel_after=0 → cancel on the very first check → solver_cancelled always thrown
+    cancellable_test_repo c{repo(pkg("foo", 1, {})), /*cancel_after=*/0};
+    CHECK_THROWS_AS(pubgrub::solve(reqs(req("foo", {1, 2})), c), pubgrub::solver_cancelled);
+    CHECK(c.should_cancel_calls > 0);
+}
+
+TEST_CASE("Solver cancellation: solve succeeds when not cancelled") {
+    // cancel_after=9999 → effectively never cancelled for a simple solve
+    cancellable_test_repo c{repo(pkg("foo", 1, {})), /*cancel_after=*/9999};
+    auto result = pubgrub::solve(reqs(req("foo", {1, 2})), c);
+    CHECK(result == reqs(req("foo", {1, 2})));
+}
+
+// ---------------------------------------------------------------------------
+// Priority-based package selection (prioritizable_provider)
+// ---------------------------------------------------------------------------
+
+// Wraps test_repo and records prioritize() calls.
+struct prioritizing_test_repo {
+    test_repo base;
+    mutable int priority_calls = 0;
+
+    auto best_candidate(const pubgrub::test::simple_req& r) const noexcept {
+        return base.best_candidate(r);
+    }
+    std::vector<pubgrub::test::simple_req>
+    requirements_of(const pubgrub::test::simple_req& r) const noexcept {
+        return base.requirements_of(r);
+    }
+    void debug(std::string_view sv) const noexcept { base.debug(sv); }
+
+    // Prioritize by conflict count (more conflicts → decide sooner).
+    int prioritize(const pubgrub::test::simple_req&, std::size_t conflicts) const noexcept {
+        ++priority_calls;
+        return static_cast<int>(conflicts);
+    }
+};
+
+TEST_CASE("Prioritize hook is invoked and solver still finds correct solution") {
+    static_assert(pubgrub::prioritizable_provider<prioritizing_test_repo,
+                                                   pubgrub::test::simple_req>,
+                  "prioritizing_test_repo must satisfy prioritizable_provider");
+
+    prioritizing_test_repo p{repo(
+        pkg("foo", 1, {req("bar", {1, 6}), req("baz", {3, 8})}),
+        pkg("bar", 3, {}),
+        pkg("bar", 4, {}),
+        pkg("baz", 6, {req("bar", {4, 5})})
+    )};
+
+    auto result = pubgrub::solve(reqs(req("foo", {1, 2})), p);
+    // Decisions are inserted in order (foo→bar→baz), matching the "Basic backtracking" case.
+    CHECK(result == reqs(req("foo", {1, 2}), req("bar", {4, 5}), req("baz", {6, 7})));
+    CHECK(p.priority_calls > 0);
+}
+
+TEST_CASE("Conflict counts are passed to prioritize after backtracking") {
+    // Tracks the maximum conflict count seen per package across all prioritize() calls.
+    struct conflict_tracking_repo {
+        test_repo base;
+        mutable std::map<std::string, std::size_t> max_conflict;
+
+        auto best_candidate(const pubgrub::test::simple_req& r) const noexcept {
+            return base.best_candidate(r);
+        }
+        std::vector<pubgrub::test::simple_req>
+        requirements_of(const pubgrub::test::simple_req& r) const noexcept {
+            return base.requirements_of(r);
+        }
+        void debug(std::string_view) const noexcept {}
+
+        int prioritize(const pubgrub::test::simple_req& req, std::size_t conflicts) const noexcept {
+            max_conflict[req.key] = std::max(max_conflict[req.key], conflicts);
+            return static_cast<int>(conflicts);
+        }
+    };
+
+    // "Circular dep with older version": a@2 depends on b@1, b@1 depends on a@[1,2).
+    // a@2 is tried first (highest), b@1 is then tried, but b@1 requires a@[1,2) which
+    // conflicts with the already-decided a@2.  The solver backtracks and settles on a@1.
+    conflict_tracking_repo p{repo(
+        pkg("a", 1, {}),
+        pkg("a", 2, {req("b", {1, 2})}),
+        pkg("b", 1, {req("a", {1, 2})})
+    )};
+
+    auto result = pubgrub::solve(reqs(req("a", {1, 1000})), p);
+    CHECK(result == reqs(req("a", {1, 2})));
+
+    // Backtracking occurred: at least one package must have a non-zero conflict count.
+    std::size_t total = 0;
+    for (auto& [k, v] : p.max_conflict) {
+        total += v;
+    }
+    CHECK(total > 0);
+}
+
+// ---------------------------------------------------------------------------
+// Dependency unavailability (provider_with_dependency_info)
+// ---------------------------------------------------------------------------
+
+// Wraps test_repo and can mark packages as having unavailable dependencies.
+struct unavailability_test_repo {
+    test_repo                  base;
+    std::set<std::string>      unavailable;
+
+    auto best_candidate(const pubgrub::test::simple_req& r) const noexcept {
+        return base.best_candidate(r);
+    }
+    std::vector<pubgrub::test::simple_req>
+    requirements_of(const pubgrub::test::simple_req& r) const noexcept {
+        // Concept-required fallback; the solver calls get_dependencies() at runtime.
+        return base.requirements_of(r);
+    }
+    void debug(std::string_view sv) const noexcept { base.debug(sv); }
+
+    pubgrub::dependency_result<pubgrub::test::simple_req>
+    get_dependencies(const pubgrub::test::simple_req& r) const {
+        if (unavailable.count(r.key)) {
+            return pubgrub::dependency_result<pubgrub::test::simple_req>::unavailable(
+                "dependencies of '" + r.key + "' are unavailable");
+        }
+        auto deps = base.requirements_of(r);
+        return pubgrub::dependency_result<pubgrub::test::simple_req>::available(
+            std::vector<pubgrub::test::simple_req>(deps.begin(), deps.end()));
+    }
+};
+
+TEST_CASE("dependency_result API") {
+    using DR = pubgrub::dependency_result<pubgrub::test::simple_req>;
+    auto avail = DR::available({req("foo", {1, 2})});
+    CHECK(avail.is_available());
+    CHECK(avail.requirements().size() == 1);
+
+    auto unavail = DR::unavailable("no network");
+    CHECK(!unavail.is_available());
+    CHECK(unavail.reason() == "no network");
+}
+
+TEST_CASE("Dependency unavailability causes solver failure") {
+    static_assert(
+        pubgrub::provider_with_dependency_info<unavailability_test_repo, pubgrub::test::simple_req>,
+        "unavailability_test_repo must satisfy provider_with_dependency_info");
+
+    // foo is available but its dependencies cannot be retrieved → solve should fail.
+    unavailability_test_repo ur{
+        repo(pkg("foo", 1, {req("bar", {1, 2})}), pkg("bar", 1, {})),
+        /*unavailable=*/{"foo"}
+    };
+
+    using fail_t = pubgrub::solve_failure_type_t<pubgrub::test::simple_req>;
+    CHECK_THROWS_AS(pubgrub::solve(reqs(req("foo", {1, 2})), ur), fail_t);
+}
+
+TEST_CASE("Dependency unavailability explanation uses 'unavailable'") {
+    unavailability_test_repo ur{
+        repo(pkg("foo", 1, {req("bar", {1, 2})}), pkg("bar", 1, {})),
+        /*unavailable=*/{"foo"}
+    };
+
+    using fail_t = pubgrub::solve_failure_type_t<pubgrub::test::simple_req>;
+    bool saw_unavailable = false;
+    try {
+        pubgrub::solve(reqs(req("foo", {1, 2})), ur);
+        FAIL("Expected failure");
+    } catch (const fail_t& fail) {
+        pubgrub::generate_explanation(fail, [&](auto event) {
+            using T = std::decay_t<decltype(event)>;
+            if constexpr (
+                std::is_same_v<T, pubgrub::explain::conclusion<pubgrub::explain::unavailable<pubgrub::test::simple_req>>>
+                || std::is_same_v<T, pubgrub::explain::premise<pubgrub::explain::unavailable<pubgrub::test::simple_req>>>) {
+                saw_unavailable = true;
+            }
+        });
+    }
+    CHECK(saw_unavailable);
+}
+
+// ---------------------------------------------------------------------------
+// SemanticVersion utility
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SemanticVersion ordering") {
+    using SV = pubgrub::semantic_version;
+    CHECK(SV{1, 0, 0} < SV{2, 0, 0});
+    CHECK(SV{1, 2, 3} < SV{1, 3, 0});
+    CHECK(SV{1, 2, 3} < SV{1, 2, 4});
+    CHECK(SV{1, 2, 3} == SV{1, 2, 3});
+    CHECK(SV{2, 0, 0} > SV{1, 9, 9});
+}
+
+TEST_CASE("SemanticVersion bump helpers") {
+    using SV = pubgrub::semantic_version;
+    CHECK(SV{1, 2, 3}.bump_patch() == SV{1, 2, 4});
+    CHECK(SV{1, 2, 3}.bump_minor() == SV{1, 3, 0});
+    CHECK(SV{1, 2, 3}.bump_major() == SV{2, 0, 0});
+}
+
+TEST_CASE("SemanticVersion to_string") {
+    CHECK(pubgrub::semantic_version{1, 2, 3}.to_string() == "1.2.3");
+    CHECK(pubgrub::semantic_version{0, 0, 0}.to_string() == "0.0.0");
+}
+
+TEST_CASE("semver::parse succeeds for valid input") {
+    auto v = pubgrub::semver::parse("1.2.3");
+    REQUIRE(v.has_value());
+    CHECK(*v == (pubgrub::semantic_version{1, 2, 3}));
+}
+
+TEST_CASE("semver::parse returns nullopt for invalid input") {
+    CHECK(!pubgrub::semver::parse(""));
+    CHECK(!pubgrub::semver::parse("1.2"));
+    CHECK(!pubgrub::semver::parse("1.2.3.4"));
+    CHECK(!pubgrub::semver::parse("1.abc.3"));
+    CHECK(!pubgrub::semver::parse("1.2.3x"));
+}
+
+TEST_CASE("semver::parse_strict throws on invalid input") {
+    CHECK_THROWS_AS(pubgrub::semver::parse_strict("not-a-version"), std::invalid_argument);
 }
