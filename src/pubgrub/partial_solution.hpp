@@ -174,6 +174,35 @@ public:
         }
     }
 
+    /**
+     * @brief Return the undecided positive requirement with the highest score according to
+     *        the provided scoring function.
+     *
+     * The scorer is called as `scorer(req)` and must return a less-than-comparable value.
+     * The requirement with the *greatest* score is returned.  Returns nullptr if there are no
+     * undecided positive terms.
+     *
+     * @param scorer Callable with signature `Score(const requirement_type&)`.
+     */
+    template <typename Scorer>
+    const requirement_type* priority_unsatisfied_term(Scorer&& scorer) const noexcept {
+        const requirement_type* best = nullptr;
+        using score_type = std::invoke_result_t<Scorer, const requirement_type&>;
+        std::optional<score_type> best_score;
+
+        for (const auto& [k, t] : _positives) {
+            if (_decided_keys.contains(k)) {
+                continue;
+            }
+            auto score = scorer(t.requirement);
+            if (!best_score || *best_score < score) {
+                best       = &t.requirement;
+                best_score = std::move(score);
+            }
+        }
+        return best;
+    }
+
     void backtrack_to(std::size_t decision_level) noexcept {
         neo_assertion_breadcrumbs("Backtracking partial solution",
                                   _assignments.back().decision_level,

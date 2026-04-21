@@ -2,6 +2,7 @@
 
 #include <pubgrub/concepts.hpp>
 #include <pubgrub/debug.hpp>
+#include <pubgrub/dependency_result.hpp>
 #include <pubgrub/failure.hpp>
 #include <pubgrub/incompatibility.hpp>
 #include <pubgrub/partial_solution.hpp>
@@ -12,6 +13,7 @@
 #include <initializer_list>
 #include <iostream>
 #include <list>
+#include <map>
 #include <set>
 #include <variant>
 #include <vector>
@@ -141,6 +143,9 @@ struct solver {
     key_set_type       changed = key_set_type(rebind_alloc<key_type>(alloc));
     sln_type           sln{alloc};
 
+    /// Per-package conflict counter used to drive optional prioritization.
+    std::map<key_type, std::size_t> conflict_counts;
+
     void _debug(std::string_view sv, const auto&... args) const {
         debug::debug(provider, sv, args...);
     }
@@ -156,6 +161,12 @@ struct solver {
 
     auto solve() {
         for (; !changed.empty(); speculate_one_decision()) {
+            // Optional cancellation check: called once per propagation round.
+            if constexpr (cancellable_provider<provider_type>) {
+                if (provider.should_cancel()) {
+                    throw solver_cancelled{};
+                }
+            }
             unit_propagation();
         }
 
@@ -164,7 +175,20 @@ struct solver {
     }
 
     void speculate_one_decision() {
-        const requirement_type* next_req = sln.next_unsatisfied_term();
+        // Package selection: use provider priorities when available, else first-unsatisfied.
+        const requirement_type* next_req = nullptr;
+        if constexpr (prioritizable_provider<provider_type, requirement_type>) {
+            next_req = sln.priority_unsatisfied_term([&](const requirement_type& req) {
+                std::size_t count = 0;
+                if (auto it = conflict_counts.find(key_of(req)); it != conflict_counts.end()) {
+                    count = it->second;
+                }
+                return provider.prioritize(req, count);
+            });
+        } else {
+            next_req = sln.next_unsatisfied_term();
+        }
+
         if (!next_req) {
             return;
         }
@@ -186,15 +210,52 @@ struct solver {
                debug::try_repr{*next_req},
                debug::try_repr{*cand_req});
 
-        auto&& cand_reqs      = provider.requirements_of(*cand_req);
-        bool   found_conflict = false;
-        for (requirement_type req : cand_reqs) {
-            _debug("Requirement of {}: {}", debug::try_repr{*cand_req}, debug::try_repr{req});
-            if (key_of(req) == key_of(*cand_req)) {
-                throw std::runtime_error("Package cannot depend on itself.");
+        // Process the dependencies for this candidate.
+        // Supports two modes:
+        //  1. Advanced: provider has get_dependencies() -> dependency_result, can signal
+        //               unavailability with a reason string.
+        //  2. Basic:    provider has requirements_of() -> range<Req> (original interface).
+        if constexpr (provider_with_dependency_info<provider_type, requirement_type>) {
+            auto dep_result = provider.get_dependencies(*cand_req);
+            if (!dep_result.is_available()) {
+                _debug("Provider signalled dependencies unavailable: {}", dep_result.reason());
+                ics.emplace_record(std::vector{term_type{*cand_req, true}},
+                                   alloc,
+                                   typename ic_type::custom_cause{std::string(dep_result.reason())});
+                changed.insert(key_of(*cand_req));
+                return;
             }
+            _process_deps(*cand_req, dep_result.requirements());
+        } else {
+            auto&& cand_reqs = provider.requirements_of(*cand_req);
+            _process_deps(*cand_req, cand_reqs);
+        }
+
+        changed.insert(key_of(*cand_req));
+    }
+
+    /**
+     * @brief Process dependency requirements for a chosen candidate.
+     *
+     * Creates incompatibility records for each dependency, records a decision for the
+     * candidate if no immediate conflict is found, and handles self-dependencies gracefully.
+     */
+    template <typename Range>
+    void _process_deps(const requirement_type& cand_req, Range&& cand_reqs) {
+        bool found_conflict = false;
+        for (requirement_type req : cand_reqs) {
+            _debug("Requirement of {}: {}", debug::try_repr{cand_req}, debug::try_repr{req});
+
+            // Skip self-dependencies: a package depending on itself is always satisfied
+            // (it has already been chosen) and creating an incompatibility for it would
+            // cause issues when the candidate's version satisfies its own range.
+            if (key_of(req) == key_of(cand_req)) {
+                _debug("  Skipping self-dependency for {}", debug::try_repr{cand_req});
+                continue;
+            }
+
             const ic_type& new_ic
-                = ics.emplace_record(std::vector{term_type{*cand_req},
+                = ics.emplace_record(std::vector{term_type{cand_req},
                                                  term_type{std::move(req), false}},
                                      alloc,
                                      typename ic_type::dependency_cause{});
@@ -203,7 +264,7 @@ struct solver {
             bool this_conflicts = std::all_of(new_ic.terms().cbegin(),
                                               new_ic.terms().cend(),
                                               [&](const term_type& ic_term) {
-                                                  return ic_term.key() == key_of(*cand_req)
+                                                  return ic_term.key() == key_of(cand_req)
                                                       || sln.satisfies(ic_term);
                                               });
             if (this_conflicts) {
@@ -217,11 +278,9 @@ struct solver {
             _debug(
                 "No conflict was found. Recording speculation as a decision for the partial "
                 "solution");
-            sln.record_decision(term_type{*cand_req});
+            sln.record_decision(term_type{cand_req});
             _debug("New partial solution: {}", neo::repr_value(sln));
         }
-
-        changed.insert(key_of(*cand_req));
     }
 
     /**
@@ -272,6 +331,12 @@ struct solver {
             _debug("  Performing conflict resolution for {}", neo::repr_value(ic));
             const ic_type& root_cause = resolve_conflict(ic);
             _debug("  Determined root cause of conflict to be {}", neo::repr_value(root_cause));
+
+            // Update per-package conflict counts for use by the optional prioritize hook.
+            for (const auto& t : root_cause.terms()) {
+                conflict_counts[t.key()]++;
+            }
+
             auto res2    = check_conflict(root_cause);
             auto almost2 = std::get_if<almost_conflict>(&res2);
             neo_assert(invariant,
